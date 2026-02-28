@@ -10,9 +10,9 @@ class BeemOtpTest extends TestCase
 {
     public function test_request_pin_returns_pin_id_on_success(): void
     {
-        config()->set('beem.api_key', 'api123');
-        config()->set('beem.secret_key', 'sec456');
-        config()->set('beem.otp.app_id', 1);
+        config()->set('beem.api_key', '  "api123"  ');
+        config()->set('beem.secret_key', "  'sec456'  ");
+        config()->set('beem.otp.app_id', ' 1 ');
         config()->set('beem.otp.request_url', 'https://apiotp.beem.africa/v1/request');
 
         Http::fake([
@@ -38,7 +38,7 @@ class BeemOtpTest extends TestCase
 
             return $request->url() === 'https://apiotp.beem.africa/v1/request'
                 && $authHeader === $expectedAuth
-                && $request['appId'] === 1
+                && (string) $request['appId'] === '1'
                 && $request['msisdn'] === '255700001800';
         });
     }

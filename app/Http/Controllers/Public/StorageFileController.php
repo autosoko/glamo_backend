@@ -4,12 +4,13 @@ namespace App\Http\Controllers\Public;
 
 use App\Http\Controllers\Controller;
 use App\Support\PublicFileUrl;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class StorageFileController extends Controller
 {
-    public function show(string $path): StreamedResponse
+    public function show(Request $request, string $path): BinaryFileResponse
     {
         $normalized = PublicFileUrl::normalizePath($path);
 
@@ -22,6 +23,20 @@ class StorageFileController extends Controller
             abort(404);
         }
 
-        return $disk->response($normalized);
+        $absolutePath = $disk->path($normalized);
+        $lastModified = $disk->lastModified($normalized);
+        $etag = sha1($normalized . '|' . $lastModified . '|' . (string) @filesize($absolutePath));
+
+        $response = response()->file($absolutePath);
+        $response->setPublic();
+        $response->setEtag($etag);
+        $response->setLastModified(\DateTimeImmutable::createFromFormat('U', (string) $lastModified) ?: new \DateTimeImmutable());
+        $response->headers->set('Cache-Control', 'public, max-age=3600');
+
+        if ($response->isNotModified($request)) {
+            return $response;
+        }
+
+        return $response;
     }
 }

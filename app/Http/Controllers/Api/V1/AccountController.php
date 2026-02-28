@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\DevicePushToken;
 use App\Models\User;
 use App\Services\BeemOtp;
+use App\Services\PhoneOtpService;
 use App\Services\PushNotificationService;
 use App\Support\Phone;
 use Illuminate\Database\Eloquent\Builder;
@@ -159,31 +160,23 @@ class AccountController extends Controller
         $otpValue = null;
         $debugOtp = null;
 
-        $hasBeemCreds = (bool) (config('beem.api_key') && config('beem.secret_key'));
-        if ($hasBeemCreds) {
-            $pinId = app(BeemOtp::class)->requestPin($normalized);
-            if (!$pinId) {
-                return $this->fail('Imeshindikana kutuma OTP ya simu. Jaribu tena.', 500);
-            }
+        $issued = app(PhoneOtpService::class)->issue($normalized, [
+            'user_id' => (int) $user->id,
+            'flow' => 'api-phone-change-request',
+        ]);
 
-            $otpProvider = 'beem';
-            $otpValue = $pinId;
-            $ttlSeconds = max(60, (int) app(BeemOtp::class)->ttlMinutes() * 60);
-        } else {
-            if (!config('app.debug')) {
+        if (!($issued['ok'] ?? false)) {
+            if (($issued['error'] ?? '') === 'missing_credentials') {
                 return $this->fail('Imeshindikana kutuma OTP ya simu. Wasiliana na admin kuweka Beem credentials.', 500);
             }
 
-            $otpProvider = 'local';
-            $otpValue = (string) random_int(100000, 999999);
-            $debugOtp = config('app.debug') ? $otpValue : null;
-
-            Log::info('API phone-change OTP generated (local fallback)', [
-                'user_id' => (int) $user->id,
-                'phone' => $this->maskPhone($normalized),
-                'otp' => $otpValue,
-            ]);
+            return $this->fail('Imeshindikana kutuma OTP ya simu. Jaribu tena.', 500);
         }
+
+        $otpProvider = (string) ($issued['provider'] ?? 'local');
+        $otpValue = (string) ($issued['value'] ?? '');
+        $ttlSeconds = (int) ($issued['ttl_seconds'] ?? 300);
+        $debugOtp = $issued['debug_otp'] ?? null;
 
         Cache::put($cacheKey, [
             'provider' => $otpProvider,

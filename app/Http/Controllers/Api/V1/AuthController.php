@@ -8,6 +8,7 @@ use App\Mail\WebOtpMail;
 use App\Models\Provider;
 use App\Models\User;
 use App\Services\BeemOtp;
+use App\Services\PhoneOtpService;
 use App\Services\WelcomeNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -44,6 +45,15 @@ class AuthController extends Controller
             );
         }
 
+        Log::info('API auth OTP request received', [
+            'intent' => $intent,
+            'channel' => $channel,
+            'destination' => $channel === 'phone'
+                ? $this->maskPhone($destination)
+                : $this->maskEmail($destination),
+            'role' => $role,
+        ]);
+
         $existing = $channel === 'phone'
             ? User::where('phone', $destination)->first()
             : User::where('email', $destination)->first();
@@ -63,31 +73,32 @@ class AuthController extends Controller
         $debugOtp = null;
 
         if ($channel === 'phone') {
-            $hasBeemCreds = (bool) (config('beem.api_key') && config('beem.secret_key'));
+            $issued = app(PhoneOtpService::class)->issue($destination, [
+                'intent' => $intent,
+                'role' => $role,
+                'flow' => 'api-auth-request',
+            ]);
 
-            if ($hasBeemCreds) {
-                $pinId = app(BeemOtp::class)->requestPin($destination);
-                if (!$pinId) {
-                    return $this->fail('Imeshindikana kutuma OTP ya simu. Jaribu tena.', 500);
-                }
-
-                $otpProvider = 'beem';
-                $otpValue = $pinId;
-                $ttlSeconds = max(60, (int) app(BeemOtp::class)->ttlMinutes() * 60);
-            } else {
-                if (!config('app.debug')) {
+            if (!($issued['ok'] ?? false)) {
+                if (($issued['error'] ?? '') === 'missing_credentials') {
                     return $this->fail('Imeshindikana kutuma OTP ya simu. Wasiliana na admin kuweka Beem credentials.', 500);
                 }
 
-                $otpProvider = 'local';
-                $otpValue = (string) random_int(100000, 999999);
-                $debugOtp = config('app.debug') ? $otpValue : null;
-
-                Log::info('API phone OTP generated (local fallback)', [
-                    'phone' => $this->maskPhone($destination),
-                    'otp' => $otpValue,
-                ]);
+                return $this->fail('Imeshindikana kutuma OTP ya simu. Jaribu tena.', 500);
             }
+
+            $otpProvider = (string) ($issued['provider'] ?? 'local');
+            $otpValue = (string) ($issued['value'] ?? '');
+            $ttlSeconds = (int) ($issued['ttl_seconds'] ?? 300);
+            $debugOtp = $issued['debug_otp'] ?? null;
+
+            Log::info('API auth OTP request dispatched', [
+                'intent' => $intent,
+                'channel' => $channel,
+                'destination' => $this->maskPhone($destination),
+                'provider' => $otpProvider,
+                'ttl_seconds' => $ttlSeconds,
+            ]);
         } else {
             $otpProvider = 'email';
             $otpValue = (string) random_int(100000, 999999);

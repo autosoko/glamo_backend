@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Mail\WebOtpMail;
 use App\Models\User;
 use App\Services\BeemOtp;
+use App\Services\PhoneOtpService;
 use App\Services\WelcomeNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -58,17 +59,14 @@ class AuthPhoneController extends Controller
 
         $sent = false;
         if ($channel === 'phone') {
-            $hasBeemCreds = (bool) (config('beem.api_key') && config('beem.secret_key'));
+            $issued = app(PhoneOtpService::class)->issue($destination, [
+                'intent' => $intent,
+                'flow' => 'web-auth-phone-send',
+            ]);
 
-            if (!$hasBeemCreds) {
-                $sent = false;
-            } else {
-                $pinId = app(BeemOtp::class)->requestPin($destination);
-                if ($pinId) {
-                    $ttl = app(BeemOtp::class)->ttlMinutes();
-                    Cache::put($cacheKey, $pinId, now()->addMinutes($ttl));
-                    $sent = true;
-                }
+            if ($issued['ok'] ?? false) {
+                Cache::put($cacheKey, (string) ($issued['value'] ?? ''), now()->addSeconds((int) ($issued['ttl_seconds'] ?? 300)));
+                $sent = true;
             }
         } else {
             $otp = (string) random_int(100000, 999999);

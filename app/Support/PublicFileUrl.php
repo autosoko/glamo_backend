@@ -7,6 +7,8 @@ use Illuminate\Support\Str;
 
 class PublicFileUrl
 {
+    private static array $existingPathCache = [];
+
     public static function normalizePath(string $path): string
     {
         $normalized = ltrim(str_replace('\\', '/', trim($path)), '/');
@@ -57,7 +59,14 @@ class PublicFileUrl
             return $fallback;
         }
 
-        if (! Storage::disk('public')->exists($normalized)) {
+        $exists = self::$existingPathCache[$normalized] ?? null;
+
+        if ($exists === null) {
+            $exists = Storage::disk('public')->exists($normalized);
+            self::$existingPathCache[$normalized] = $exists;
+        }
+
+        if (!$exists) {
             return $fallback;
         }
 

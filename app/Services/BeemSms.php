@@ -16,9 +16,9 @@ class BeemSms
 
     public function sendMessage(string $destAddr, string $message, int $recipientId = 1): bool
     {
-        $apiKey = config('beem.api_key');
-        $secretKey = config('beem.secret_key');
-        $smsUrl = (string) config('beem.sms_url');
+        $apiKey = $this->cleanConfigString(config('beem.api_key'));
+        $secretKey = $this->cleanConfigString(config('beem.secret_key'));
+        $smsUrl = trim((string) config('beem.sms_url'));
 
         if (!$apiKey || !$secretKey || trim($smsUrl) === '') {
             return false;
@@ -34,7 +34,7 @@ class BeemSms
             return false;
         }
 
-        $senderId = (string) config('beem.sender_id', 'Glamo');
+        $senderId = $this->cleanConfigString(config('beem.sender_id', 'Glamo'));
 
         try {
             $response = Http::timeout(12)
@@ -123,5 +123,10 @@ class BeemSms
         $stars = str_repeat('*', max(0, strlen($digits) - 5));
 
         return $start.$stars.$end;
+    }
+
+    private function cleanConfigString(mixed $value): string
+    {
+        return trim((string) $value, " \t\n\r\0\x0B\"'");
     }
 }

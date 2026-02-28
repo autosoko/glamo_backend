@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Models\Provider;
 use App\Models\Order;
 use App\Services\BeemOtp;
+use App\Services\PhoneOtpService;
 use App\Services\WelcomeNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -229,8 +230,14 @@ class AuthController extends Controller
         $isValid = false;
 
         if ($channel === 'phone') {
-            $pinId = trim((string) ($cached ?? ''));
-            $isValid = $pinId !== '' && app(BeemOtp::class)->verifyPin($pinId, $otp);
+            $cachedStr = trim((string) ($cached ?? ''));
+            $isDevOtp = ctype_digit($cachedStr) && strlen($cachedStr) === 6;
+
+            $isValid = $cachedStr !== '' && (
+                $isDevOtp
+                    ? hash_equals($cachedStr, $otp)
+                    : app(BeemOtp::class)->verifyPin($cachedStr, $otp)
+            );
         } else {
             $isValid = $cached && hash_equals((string) $cached, $otp);
         }
@@ -328,23 +335,14 @@ class AuthController extends Controller
         Cache::forget($cacheKey);
 
         $sent = false;
-        $hasBeemCreds = (bool) (config('beem.api_key') && config('beem.secret_key'));
+        $issued = app(PhoneOtpService::class)->issue($phone, [
+            'flow' => 'web-set-password-phone-send',
+            'intent' => $intent,
+            'channel' => $channel,
+        ]);
 
-        if ($hasBeemCreds) {
-            $pinId = app(BeemOtp::class)->requestPin($phone);
-            if ($pinId) {
-                $ttl = app(BeemOtp::class)->ttlMinutes();
-                Cache::put($cacheKey, $pinId, now()->addMinutes($ttl));
-                $sent = true;
-            }
-        } else {
-            // Development fallback when Beem credentials are not configured.
-            $otp = (string) random_int(100000, 999999);
-            Cache::put($cacheKey, $otp, now()->addMinutes(5));
-            Log::info('Set-password phone OTP generated (local fallback)', [
-                'phone' => $this->maskPhone($phone),
-                'otp' => $otp,
-            ]);
+        if ($issued['ok'] ?? false) {
+            Cache::put($cacheKey, (string) ($issued['value'] ?? ''), now()->addSeconds((int) ($issued['ttl_seconds'] ?? 300)));
             $sent = true;
         }
 
@@ -629,17 +627,15 @@ class AuthController extends Controller
 
         $sent = false;
         if ($channel === 'phone') {
-            $hasBeemCreds = (bool) (config('beem.api_key') && config('beem.secret_key'));
+            $issued = app(PhoneOtpService::class)->issue($destination, [
+                'intent' => $intent,
+                'role' => $role,
+                'flow' => 'web-auth-start',
+            ]);
 
-            if (!$hasBeemCreds) {
-                $sent = false;
-            } else {
-                $pinId = app(BeemOtp::class)->requestPin($destination);
-                if ($pinId) {
-                    $ttl = app(BeemOtp::class)->ttlMinutes();
-                    Cache::put($cacheKey, $pinId, now()->addMinutes($ttl));
-                    $sent = true;
-                }
+            if ($issued['ok'] ?? false) {
+                Cache::put($cacheKey, (string) ($issued['value'] ?? ''), now()->addSeconds((int) ($issued['ttl_seconds'] ?? 300)));
+                $sent = true;
             }
         } else {
             $otp = (string) random_int(100000, 999999);
