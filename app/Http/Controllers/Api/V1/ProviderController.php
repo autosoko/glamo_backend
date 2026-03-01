@@ -17,7 +17,9 @@ use App\Models\Service;
 use App\Models\User;
 use App\Services\BeemSms;
 use App\Services\AppNotificationService;
+use App\Services\ProviderAvailabilityService;
 use App\Services\OrderService;
+use App\Services\OrderRealtimeService;
 use App\Services\ProviderDebtService;
 use App\Services\ProviderWalletService;
 use App\Services\SnippePay;
@@ -41,10 +43,7 @@ class ProviderController extends Controller
 
         $approvalStatus = (string) ($provider->approval_status ?? 'pending');
         $onboardingComplete = $provider->onboarding_completed_at !== null || $approvalStatus === 'approved';
-        $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-        if ($debtBlock <= 0) {
-            $debtBlock = 10000;
-        }
+        $debtBlock = app(ProviderAvailabilityService::class)->debtBlockThreshold();
         $hasBlockingOrders = $this->providerHasBlockingOrders((int) $provider->id);
 
         $walletBalance = Schema::hasColumn('providers', 'wallet_balance')
@@ -276,7 +275,7 @@ class ProviderController extends Controller
         $feedback = DB::transaction(function () use ($order, $provider, $data) {
             $lockedOrder = Order::query()->whereKey((int) $order->id)->lockForUpdate()->firstOrFail();
             if ((int) $lockedOrder->provider_id !== (int) $provider->id) {
-                abort(403, 'Not your order.');
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             if ((string) ($lockedOrder->status ?? '') !== 'completed') {
@@ -414,62 +413,44 @@ class ProviderController extends Controller
     public function updateAvailability(Request $request)
     {
         [, $provider] = $this->resolveProvider($request);
+        $availability = app(ProviderAvailabilityService::class);
 
         $data = $request->validate([
             'online_status' => ['required', Rule::in(['online', 'offline'])],
         ]);
 
         $targetStatus = (string) ($data['online_status'] ?? 'offline');
-        $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-        if ($debtBlock <= 0) {
-            $debtBlock = 10000;
-        }
+        $debtBlock = $availability->debtBlockThreshold();
 
         try {
-            $provider = DB::transaction(function () use ($provider, $targetStatus, $debtBlock) {
+            $provider = DB::transaction(function () use ($provider, $targetStatus, $debtBlock, $availability) {
                 $lockedProvider = Provider::query()->whereKey((int) $provider->id)->lockForUpdate()->firstOrFail();
 
-                $this->refreshProviderAvailability($lockedProvider);
+                $availability->sync($lockedProvider);
                 $lockedProvider->refresh();
 
-                $debtBalance = max(0, (float) ($lockedProvider->debt_balance ?? 0));
-                if ($debtBalance > 0) {
+                if ($availability->hasBlockingOrders((int) $lockedProvider->id)) {
                     throw ValidationException::withMessages([
-                        'online_status' => ['Huwezi kubadili status ukiwa na deni. Lipa deni kwanza.'],
+                        'online_status' => ['Una oda ambayo bado iko active. Kamilisha au gahirisha oda kwanza.'],
                     ]);
                 }
 
                 if ($targetStatus === 'online') {
-                    if ((string) ($lockedProvider->approval_status ?? '') !== 'approved') {
+                    if ((string) ($lockedProvider->approval_status ?? '') !== 'approved' || !(bool) ($lockedProvider->is_active ?? true)) {
                         throw ValidationException::withMessages([
                             'online_status' => ['Akaunti yako bado haijapitishwa kikamilifu.'],
                         ]);
                     }
 
-                    if ($this->providerHasBlockingOrders((int) $lockedProvider->id)) {
+                    if ($availability->isDebtBlocked($lockedProvider, $debtBlock)) {
                         throw ValidationException::withMessages([
-                            'online_status' => ['Una oda ambayo bado haijacomplete. Kamilisha oda kwanza.'],
+                            'online_status' => ['Deni limefika TZS ' . number_format($debtBlock, 0) . ' au zaidi. Lipa deni liwe chini ya hapo kwanza.'],
                         ]);
                     }
 
-                    $isDebtBlocked = $debtBalance > $debtBlock
-                        || ((string) ($lockedProvider->online_status ?? '') === 'blocked_debt' && $debtBalance >= $debtBlock);
-
-                    if ($isDebtBlocked) {
-                        throw ValidationException::withMessages([
-                            'online_status' => ['Deni limefikia kikomo cha kufungiwa online.'],
-                        ]);
-                    }
-
-                    $lockedProvider->update([
-                        'online_status' => 'online',
-                        'offline_reason' => null,
-                    ]);
+                    $availability->markManualOnline($lockedProvider);
                 } else {
-                    $lockedProvider->update([
-                        'online_status' => 'offline',
-                        'offline_reason' => 'Imewekwa offline na mtoa huduma.',
-                    ]);
+                    $availability->markManualOffline($lockedProvider);
                 }
 
                 return $lockedProvider->fresh();
@@ -571,6 +552,12 @@ class ProviderController extends Controller
         if ($fresh) {
             $this->sendClientOrderAcceptedSms($fresh, $goNow);
             $orderNo = (string) ($fresh->order_no ?? '#' . $fresh->id);
+            $statusMeta = [
+                'status' => (string) $fresh->status,
+                'client_target_screen' => 'order_details',
+                'provider_target_screen' => 'provider_order_details',
+                'clear_active_order' => false,
+            ];
             $this->sendClientOrderStatusNotification(
                 $fresh,
                 $goNow ? 'order_accepted' : 'order_scheduled',
@@ -578,10 +565,9 @@ class ProviderController extends Controller
                 $goNow
                     ? 'Mtoa huduma yuko njiani kwenye oda ' . $orderNo . '.'
                     : 'Mtoa huduma amekubali oda ' . $orderNo . ' na amepanga kuanza muda uliopangwa.',
-                [
-                    'status' => (string) $fresh->status,
-                ]
+                $statusMeta
             );
+            $this->broadcastOrderStatusChange($fresh, $statusMeta);
         }
 
         return $this->ok([
@@ -606,7 +592,7 @@ class ProviderController extends Controller
                 $lockedProvider = Provider::whereKey((int) $provider->id)->lockForUpdate()->firstOrFail();
 
                 if ((int) $lockedOrder->provider_id !== (int) $lockedProvider->id) {
-                    abort(403, 'Not your order.');
+                    abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
                 }
 
                 if (in_array((string) $lockedOrder->status, ['completed', 'cancelled'], true)) {
@@ -668,7 +654,7 @@ class ProviderController extends Controller
                     }
                 }
 
-                $this->refreshProviderAvailability($lockedProvider, (int) $lockedOrder->id, true);
+                $this->refreshProviderAvailability($lockedProvider, (int) $lockedOrder->id, true, null, true);
             });
         } catch (\Throwable $e) {
             return $this->fail($this->orderActionError($e, 'Imeshindikana kughairi oda hii kwa sasa.'), 422);
@@ -678,16 +664,22 @@ class ProviderController extends Controller
         if ($fresh) {
             $this->sendClientOrderRejectedSms($fresh, (string) $data['reason']);
             $orderNo = (string) ($fresh->order_no ?? '#' . $fresh->id);
+            $statusMeta = [
+                'status' => (string) $fresh->status,
+                'reason' => trim((string) $data['reason']),
+                'target_screen' => 'home',
+                'client_target_screen' => 'home',
+                'provider_target_screen' => 'home',
+                'clear_active_order' => true,
+            ];
             $this->sendClientOrderStatusNotification(
                 $fresh,
                 'order_rejected',
                 'Oda imekataliwa',
                 'Oda ' . $orderNo . ' imekataliwa. Tafadhali chagua mtoa huduma mwingine.',
-                [
-                    'status' => (string) $fresh->status,
-                    'reason' => trim((string) $data['reason']),
-                ]
+                $statusMeta
             );
+            $this->broadcastOrderStatusChange($fresh, $statusMeta);
         }
 
         return $this->ok([
@@ -706,7 +698,7 @@ class ProviderController extends Controller
             $locked = Order::whereKey((int) $order->id)->lockForUpdate()->firstOrFail();
 
             if ((int) $locked->provider_id !== (int) $provider->id) {
-                abort(403, 'Not your order.');
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             if (!in_array((string) $locked->status, ['accepted', 'on_the_way'], true)) {
@@ -723,15 +715,20 @@ class ProviderController extends Controller
         });
 
         $orderNo = (string) ($order->order_no ?? '#' . $order->id);
+        $statusMeta = [
+            'status' => (string) $order->status,
+            'client_target_screen' => 'order_details',
+            'provider_target_screen' => 'provider_order_details',
+            'clear_active_order' => false,
+        ];
         $this->sendClientOrderStatusNotification(
             $order,
             'order_on_the_way',
             'Mtoa huduma yuko njiani',
             'Mtoa huduma yuko njiani kwenye oda ' . $orderNo . '.',
-            [
-                'status' => (string) $order->status,
-            ]
+            $statusMeta
         );
+        $this->broadcastOrderStatusChange($order, $statusMeta);
 
         return $this->ok([
             'order' => $this->providerOrderPayload($order, false, $provider),
@@ -750,7 +747,7 @@ class ProviderController extends Controller
                 $locked = Order::whereKey((int) $order->id)->lockForUpdate()->firstOrFail();
 
                 if ((int) $locked->provider_id !== (int) $provider->id) {
-                    abort(403, 'Not your order.');
+                    abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
                 }
 
                 if (!in_array((string) $locked->status, ['accepted', 'on_the_way'], true)) {
@@ -780,15 +777,20 @@ class ProviderController extends Controller
         }
 
         $orderNo = (string) ($order->order_no ?? '#' . $order->id);
+        $statusMeta = [
+            'status' => (string) $order->status,
+            'client_target_screen' => 'order_details',
+            'provider_target_screen' => 'provider_order_details',
+            'clear_active_order' => false,
+        ];
         $this->sendClientOrderStatusNotification(
             $order,
             'order_arrived',
             'Mtoa huduma amefika',
             'Mtoa huduma amefika kwenye location ya oda ' . $orderNo . '.',
-            [
-                'status' => (string) $order->status,
-            ]
+            $statusMeta
         );
+        $this->broadcastOrderStatusChange($order, $statusMeta);
 
         return $this->ok([
             'order' => $this->providerOrderPayload($order, false, $provider),
@@ -811,7 +813,7 @@ class ProviderController extends Controller
 
             $providerFresh = Provider::query()->find((int) $provider->id);
             if ($providerFresh) {
-                $this->refreshProviderAvailability($providerFresh, null, true);
+                $this->refreshProviderAvailability($providerFresh, null, true, null, true);
             }
         } catch (\Throwable $e) {
             return $this->fail($this->orderActionError($e, 'Imeshindikana kumaliza oda hii kwa sasa.'), 422);
@@ -820,16 +822,22 @@ class ProviderController extends Controller
         $fresh = Order::query()->with(['service.category', 'client'])->find((int) $order->id);
         if ($fresh) {
             $orderNo = (string) ($fresh->order_no ?? '#' . $fresh->id);
+            $statusMeta = [
+                'status' => (string) $fresh->status,
+                'target_screen' => 'home',
+                'client_target_screen' => 'home',
+                'provider_target_screen' => 'home',
+                'clear_active_order' => true,
+                'show_review' => true,
+            ];
             $this->sendClientOrderStatusNotification(
                 $fresh,
                 'order_completed',
                 'Oda imekamilika',
                 'Oda ' . $orderNo . ' imekamilika. Karibu uweke review.',
-                [
-                    'status' => (string) $fresh->status,
-                    'target_screen' => 'order_review',
-                ]
+                $statusMeta
             );
+            $this->broadcastOrderStatusChange($fresh, $statusMeta);
         }
 
         return $this->ok([
@@ -868,7 +876,7 @@ class ProviderController extends Controller
                 $lockedProvider = Provider::whereKey((int) $provider->id)->lockForUpdate()->firstOrFail();
 
                 if ((int) $lockedOrder->provider_id !== (int) $lockedProvider->id) {
-                    abort(403, 'Not your order.');
+                    abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
                 }
 
                 if (!in_array((string) $lockedOrder->status, ['accepted', 'on_the_way', 'in_progress'], true)) {
@@ -891,6 +899,14 @@ class ProviderController extends Controller
         }
 
         $fresh = Order::query()->with(['service.category', 'client'])->find((int) $order->id);
+        if ($fresh) {
+            $this->broadcastOrderStatusChange($fresh, [
+                'status' => (string) $fresh->status,
+                'client_target_screen' => 'order_details',
+                'provider_target_screen' => 'provider_order_details',
+                'clear_active_order' => false,
+            ]);
+        }
 
         return $this->ok([
             'order' => $fresh ? $this->providerOrderPayload($fresh, false, $provider) : null,
@@ -1551,116 +1567,26 @@ class ProviderController extends Controller
         Provider $provider,
         ?int $excludeOrderId = null,
         bool $ignoreSuspended = false,
-        ?string $busyReason = null
+        ?string $busyReason = null,
+        bool $restoreOnlineWhenEligible = false
     ): void {
-        $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-        if ($debtBlock <= 0) {
-            $debtBlock = 10000;
-        }
-
-        $debt = max(0, (float) ($provider->debt_balance ?? 0));
-        $currentStatus = (string) ($provider->online_status ?? 'offline');
-        $isDebtBlocked = $debt > $debtBlock || ($currentStatus === 'blocked_debt' && $debt >= $debtBlock);
-
-        if ($this->providerHasBlockingOrders((int) $provider->id, $excludeOrderId, $ignoreSuspended)) {
-            if ($isDebtBlocked) {
-                $provider->update([
-                    'online_status' => 'blocked_debt',
-                    'offline_reason' => 'Deni limefika kikomo. Lipa deni ushuke chini ya TZS ' . number_format($debtBlock, 0) . '.',
-                ]);
-                return;
-            }
-
-            $provider->update([
-                'online_status' => 'offline',
-                'offline_reason' => $busyReason ?: 'Ana oda nyingine inayoendelea.',
-            ]);
-            return;
-        }
-
-        if ($isDebtBlocked) {
-            $provider->update([
-                'online_status' => 'blocked_debt',
-                'offline_reason' => 'Deni limefika kikomo. Lipa deni ushuke chini ya TZS ' . number_format($debtBlock, 0) . '.',
-            ]);
-            return;
-        }
-
-        if ((string) ($provider->approval_status ?? '') !== 'approved' || !(bool) ($provider->is_active ?? true)) {
-            $provider->update([
-                'online_status' => 'offline',
-                'offline_reason' => 'Akaunti bado haijaruhusiwa kwenda online.',
-            ]);
-            return;
-        }
-
-        if ($currentStatus === 'blocked_debt') {
-            $provider->update([
-                'online_status' => 'offline',
-                'offline_reason' => 'Deni limepungua. Unaweza kujiweka online.',
-            ]);
-            return;
-        }
-
-        if ($currentStatus === 'busy') {
-            $provider->update([
-                'online_status' => 'offline',
-                'offline_reason' => null,
-            ]);
-        }
+        app(ProviderAvailabilityService::class)->sync(
+            $provider,
+            $excludeOrderId,
+            $ignoreSuspended,
+            $busyReason,
+            $restoreOnlineWhenEligible
+        );
     }
 
     private function providerHasBlockingOrders(int $providerId, ?int $excludeOrderId = null, bool $ignoreSuspended = false): bool
     {
-        $query = Order::query()
-            ->where('provider_id', $providerId)
-            ->whereNotIn('status', ['completed', 'cancelled']);
-
-        if ($ignoreSuspended) {
-            $query->where('status', '!=', 'suspended');
-        }
-
-        if ($excludeOrderId !== null && $excludeOrderId > 0) {
-            $query->where('id', '!=', $excludeOrderId);
-        }
-
-        return $query->exists();
+        return app(ProviderAvailabilityService::class)->hasBlockingOrders($providerId, $excludeOrderId, $ignoreSuspended);
     }
 
     private function availabilityControlState(Provider $provider, bool $hasBlockingOrders, ?float $debtBlock = null): array
     {
-        $debtBlock = $debtBlock ?? (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-        if ($debtBlock <= 0) {
-            $debtBlock = 10000;
-        }
-
-        $debtBalance = max(0, (float) ($provider->debt_balance ?? 0));
-        $onlineStatus = strtolower((string) ($provider->online_status ?? 'offline'));
-        $nextAction = $onlineStatus === 'online' ? 'offline' : 'online';
-
-        $canToggle = true;
-        $reason = null;
-
-        if ($debtBalance > 0) {
-            $canToggle = false;
-            $reason = 'Una deni. Lipa deni kwanza ndipo ubadilishe status.';
-        } elseif ($nextAction === 'online' && $hasBlockingOrders) {
-            $canToggle = false;
-            $reason = 'Una oda ambayo bado haijacomplete.';
-        } elseif ($nextAction === 'online' && (string) ($provider->approval_status ?? '') !== 'approved') {
-            $canToggle = false;
-            $reason = 'Akaunti yako bado haijapitishwa kikamilifu.';
-        }
-
-        return [
-            'current_status' => $onlineStatus,
-            'next_action' => $nextAction,
-            'can_toggle' => $canToggle,
-            'reason' => $reason,
-            'debt_balance' => $debtBalance,
-            'debt_block_threshold' => (float) $debtBlock,
-            'has_uncompleted_order' => $hasBlockingOrders,
-        ];
+        return app(ProviderAvailabilityService::class)->availabilityControlState($provider, $hasBlockingOrders, $debtBlock);
     }
 
     private function allowedServiceIds(Provider $provider): array
@@ -1954,6 +1880,11 @@ class ProviderController extends Controller
         } catch (\Throwable $e) {
             report($e);
         }
+    }
+
+    private function broadcastOrderStatusChange(Order $order, array $meta = []): void
+    {
+        app(OrderRealtimeService::class)->dispatchStatusChanged($order, $meta);
     }
 
     private function sendClientOrderRejectedSms(Order $order, string $reason): void

@@ -5,6 +5,7 @@ namespace App\Filament\Pages;
 use App\Models\User;
 use App\Services\AppNotificationService;
 use App\Services\PushNotificationService;
+use App\Support\AppVariant;
 use BackedEnum;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
@@ -78,6 +79,7 @@ class AppNotificationCenter extends Page
         $message = trim($this->notificationMessage);
         $screen = trim($this->targetScreen) !== '' ? trim($this->targetScreen) : 'home';
         $audience = $this->audience;
+        $appVariants = $this->audienceVariants($audience);
 
         $summary = [
             'recipients' => 0,
@@ -92,7 +94,7 @@ class AppNotificationCenter extends Page
         $this->audienceQuery($audience)
             ->select('users.id')
             ->orderBy('users.id')
-            ->chunkById(300, function ($users) use (&$summary, $title, $message, $screen, $audience): void {
+            ->chunkById(300, function ($users) use (&$summary, $title, $message, $screen, $audience, $appVariants): void {
                 $userIds = collect($users)
                     ->pluck('id')
                     ->map(fn ($id): int => (int) $id)
@@ -112,6 +114,7 @@ class AppNotificationCenter extends Page
                         'type' => 'admin_manual',
                         'source' => 'admin_app_notification',
                         'audience' => $audience,
+                        'app_variants' => $appVariants,
                         'target_screen' => $screen,
                     ],
                     true
@@ -142,8 +145,18 @@ class AppNotificationCenter extends Page
     {
         $query = $this->audienceQuery($this->audience);
         $total = (int) (clone $query)->count('users.id');
+        $variants = $this->audienceVariants($this->audience);
         $pushRegistered = (int) (clone $query)
-            ->whereHas('devicePushTokens', fn (Builder $builder): Builder => $builder->where('is_active', true))
+            ->whereHas('devicePushTokens', function (Builder $builder) use ($variants): Builder {
+                return $builder
+                    ->where('is_active', true)
+                    ->when(!empty($variants), function (Builder $tokenQuery) use ($variants): Builder {
+                        return $tokenQuery->where(function (Builder $variantQuery) use ($variants): void {
+                            $variantQuery->whereIn('app_variant', $variants)
+                                ->orWhereNull('app_variant');
+                        });
+                    });
+            })
             ->count('users.id');
 
         $this->audienceStats = [
@@ -166,10 +179,21 @@ class AppNotificationCenter extends Page
 
     private function availableAudienceOptions(): array
     {
+        $definitions = AppVariant::definitions();
+
         return [
-            'clients' => 'App ya Mteja',
-            'providers' => 'App ya Mtoa Huduma',
-            'all' => 'App Zote (Mteja + Mtoa Huduma)',
+            'clients' => 'Glamo - Mteja (' . data_get($definitions, AppVariant::CLIENT . '.package_id', 'com.beautful.link') . ')',
+            'providers' => 'Glamo Pro - Mtoa Huduma (' . data_get($definitions, AppVariant::PROVIDER . '.package_id', 'com.glamopro.link') . ')',
+            'all' => 'App Zote (Glamo + Glamo Pro)',
         ];
+    }
+
+    private function audienceVariants(string $audience): array
+    {
+        return match ($audience) {
+            'providers' => [AppVariant::PROVIDER],
+            'all' => [AppVariant::CLIENT, AppVariant::PROVIDER],
+            default => [AppVariant::CLIENT],
+        };
     }
 }

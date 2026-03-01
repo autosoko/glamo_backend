@@ -17,6 +17,8 @@ class ProviderDebtService
             if ($payment->status === 'paid') return $payment;
 
             $provider = Provider::whereKey($payment->provider_id)->lockForUpdate()->firstOrFail();
+            $availability = app(ProviderAvailabilityService::class);
+            $wasDebtBlocked = $availability->isDebtBlocked($provider);
 
             $payment->update([
                 'status' => 'paid',
@@ -38,18 +40,7 @@ class ProviderDebtService
 
             $provider->update(['debt_balance' => $newBalance]);
 
-            // Remove blocked_debt only when debt drops below threshold (strictly below).
-            $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-            if ($debtBlock <= 0) {
-                $debtBlock = 10000;
-            }
-
-            if ($provider->online_status === 'blocked_debt' && (float) $provider->debt_balance < $debtBlock) {
-                $provider->update([
-                    'online_status' => 'offline',
-                    'offline_reason' => 'Debt lowered below threshold. You can go online.',
-                ]);
-            }
+            $availability->sync($provider, null, false, null, $wasDebtBlocked);
 
             return $payment->fresh();
         });

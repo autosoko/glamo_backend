@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers\Api\V1;
 
-use App\Events\OrderMessageSent;
 use App\Http\Controllers\Api\V1\Concerns\ApiResponse;
 use App\Http\Controllers\Controller;
 use App\Models\Conversation;
@@ -10,8 +9,10 @@ use App\Models\Message;
 use App\Models\Order;
 use App\Models\User;
 use App\Services\AppNotificationService;
+use App\Services\OrderRealtimeService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
 
 class OrderChatController extends Controller
 {
@@ -96,7 +97,15 @@ class OrderChatController extends Controller
         ]);
 
         $message->load('sender:id,name,phone,role,profile_image_path');
-        event(new OrderMessageSent($order, $message));
+        try {
+            app(OrderRealtimeService::class)->dispatchMessageSent($order, $message);
+        } catch (\Throwable $e) {
+            Log::warning('Order chat realtime dispatch failed unexpectedly', [
+                'order_id' => (int) $order->id,
+                'message_id' => (int) $message->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         $order->loadMissing('provider:id,user_id');
         $recipientUserId = (int) $order->client_id === (int) $user->id
@@ -104,18 +113,30 @@ class OrderChatController extends Controller
             : (int) $order->client_id;
 
         if ($recipientUserId > 0 && $recipientUserId !== (int) $user->id) {
-            app(AppNotificationService::class)->sendToUsers(
-                [$recipientUserId],
-                'order_message',
-                'Ujumbe mpya kwenye order ' . (string) ($order->order_no ?? '#' . $order->id),
-                Str::limit((string) $message->body, 120),
-                [
-                    'order_id' => (string) (int) $order->id,
-                    'conversation_id' => (string) (int) $conversation->id,
-                    'target_screen' => 'order_chat',
-                ],
-                true
-            );
+            try {
+                app(AppNotificationService::class)->sendToUsers(
+                    [$recipientUserId],
+                    'order_message',
+                    'Ujumbe mpya kwenye order ' . (string) ($order->order_no ?? '#' . $order->id),
+                    Str::limit((string) $message->body, 120),
+                    [
+                        'order_id' => (string) (int) $order->id,
+                        'conversation_id' => (string) (int) $conversation->id,
+                        'status' => (string) ($order->status ?? ''),
+                        'target_screen' => 'order_chat',
+                        'auto_open' => false,
+                        'clear_active_order' => false,
+                    ],
+                    true
+                );
+            } catch (\Throwable $e) {
+                Log::warning('Order chat notify failed', [
+                    'order_id' => (int) $order->id,
+                    'message_id' => (int) $message->id,
+                    'recipient_user_id' => $recipientUserId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         return $this->ok([

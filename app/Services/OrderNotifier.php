@@ -12,6 +12,7 @@ class OrderNotifier
     public function __construct(
         private readonly BeemSms $beemSms,
         private readonly AppNotificationService $appNotifications,
+        private readonly OrderRealtimeService $realtime,
     )
     {
     }
@@ -23,6 +24,7 @@ class OrderNotifier
         $this->notifyClient($order);
         $this->notifyProvider($order);
         $this->notifyInAppAndPush($order);
+        $this->realtime->dispatchCreated($order);
     }
 
     private function notifyClient(Order $order): void
@@ -126,8 +128,11 @@ class OrderNotifier
                 [
                     'order_id' => (string) (int) $order->id,
                     'order_no' => $orderNo,
+                    'status' => (string) ($order->status ?? ''),
                     'service' => $serviceName,
                     'target_screen' => 'order_details',
+                    'auto_open' => true,
+                    'clear_active_order' => false,
                 ],
                 true
             );
@@ -143,8 +148,11 @@ class OrderNotifier
                 [
                     'order_id' => (string) (int) $order->id,
                     'order_no' => $orderNo,
+                    'status' => (string) ($order->status ?? ''),
                     'service' => $serviceName,
                     'target_screen' => 'provider_order_details',
+                    'auto_open' => true,
+                    'clear_active_order' => false,
                 ],
                 true
             );

@@ -9,7 +9,9 @@ use App\Models\ProviderLedger;
 use App\Models\Review;
 use App\Models\Service;
 use App\Services\OrderNotifier;
+use App\Services\OrderRealtimeService;
 use App\Services\OrderService;
+use App\Services\ProviderAvailabilityService;
 use App\Support\BookingWindow;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -43,7 +45,7 @@ class OrderController extends Controller
             $debtBlock = 10000;
         }
 
-        if ($provider->approval_status !== 'approved' || $provider->online_status !== 'online' || (float) $provider->debt_balance > $debtBlock) {
+        if ($provider->approval_status !== 'approved' || $provider->online_status !== 'online' || (float) $provider->debt_balance >= $debtBlock) {
             return response()->json(['message' => 'Provider not available.'], 422);
         }
 
@@ -94,6 +96,12 @@ class OrderController extends Controller
         // $order->load(['service','client','provider.user']);
         // $order->client->notify(new \App\Notifications\ClientOrderAccepted($order));
         // event(new \App\Events\OrderAccepted($order));
+        $this->broadcastOrderStatusChange($order, [
+            'status' => (string) $order->status,
+            'client_target_screen' => 'order_details',
+            'provider_target_screen' => 'provider_order_details',
+            'clear_active_order' => false,
+        ]);
 
         return response()->json([
             'message' => 'Order accepted.',
@@ -118,7 +126,7 @@ class OrderController extends Controller
             $lockedProvider = Provider::whereKey((int) $provider->id)->lockForUpdate()->firstOrFail();
 
             if ((int) $lockedOrder->provider_id !== (int) $lockedProvider->id) {
-                abort(403, 'Not your order.');
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             if (in_array((string) $lockedOrder->status, ['completed', 'cancelled'], true)) {
@@ -165,37 +173,19 @@ class OrderController extends Controller
                 ]);
             }
 
-            $hasOtherActive = Order::query()
-                ->where('provider_id', (int) $lockedProvider->id)
-                ->where('id', '!=', (int) $lockedOrder->id)
-                ->whereNotIn('status', ['completed', 'cancelled', 'suspended'])
-                ->exists();
-
-            $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-            if ($debtBlock <= 0) {
-                $debtBlock = 10000;
-            }
-
-            if ($hasOtherActive) {
-                $lockedProvider->update([
-                    'online_status' => 'offline',
-                    'offline_reason' => 'Ana oda nyingine inayoendelea.',
-                ]);
-            } else {
-                $debt = max(0, (float) ($lockedProvider->debt_balance ?? 0));
-                $isDebtBlocked = $debt > $debtBlock
-                    || ((string) ($lockedProvider->online_status ?? '') === 'blocked_debt' && $debt >= $debtBlock);
-
-                $lockedProvider->update([
-                    'online_status' => $isDebtBlocked ? 'blocked_debt' : 'offline',
-                    'offline_reason' => $isDebtBlocked
-                        ? ('Debt over ' . number_format($debtBlock, 0) . '. Please pay.')
-                        : null,
-                ]);
-            }
+            app(ProviderAvailabilityService::class)->sync($lockedProvider, (int) $lockedOrder->id, true, null, true);
 
             return $lockedOrder->fresh();
         });
+
+        $this->broadcastOrderStatusChange($order, [
+            'status' => (string) $order->status,
+            'target_screen' => 'home',
+            'client_target_screen' => 'home',
+            'provider_target_screen' => 'home',
+            'clear_active_order' => true,
+            'reason' => trim((string) ($data['reason'] ?? '')),
+        ]);
 
         return response()->json([
             'message' => 'Order rejected.',
@@ -215,7 +205,7 @@ class OrderController extends Controller
             $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             if ((int) $locked->provider_id !== (int) $provider->id) {
-                abort(403, 'Not your order.');
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             if (!in_array((string) $locked->status, ['accepted', 'on_the_way'], true)) {
@@ -230,6 +220,13 @@ class OrderController extends Controller
             $locked->update($updates);
             return $locked->fresh();
         });
+
+        $this->broadcastOrderStatusChange($order, [
+            'status' => (string) $order->status,
+            'client_target_screen' => 'order_details',
+            'provider_target_screen' => 'provider_order_details',
+            'clear_active_order' => false,
+        ]);
 
         return response()->json([
             'message' => 'ok',
@@ -249,7 +246,7 @@ class OrderController extends Controller
             $locked = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             if ((int) $locked->provider_id !== (int) $provider->id) {
-                abort(403, 'Not your order.');
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             if (!in_array((string) $locked->status, ['accepted', 'on_the_way'], true)) {
@@ -274,6 +271,13 @@ class OrderController extends Controller
 
             return $locked->fresh();
         });
+
+        $this->broadcastOrderStatusChange($order, [
+            'status' => (string) $order->status,
+            'client_target_screen' => 'order_details',
+            'provider_target_screen' => 'provider_order_details',
+            'clear_active_order' => false,
+        ]);
 
         return response()->json([
             'message' => 'ok',
@@ -391,6 +395,14 @@ class OrderController extends Controller
         // Optional notify client
         // $order->load(['client']);
         // $order->client->notify(new \App\Notifications\ClientOrderCompleted($order));
+        $this->broadcastOrderStatusChange($order, [
+            'status' => (string) $order->status,
+            'target_screen' => 'home',
+            'client_target_screen' => 'home',
+            'provider_target_screen' => 'home',
+            'clear_active_order' => true,
+            'show_review' => true,
+        ]);
 
         return response()->json([
             'message' => 'Order completed.',
@@ -488,5 +500,10 @@ class OrderController extends Controller
         // event(new \App\Events\LocationUpdated($order->id, $isClient ? 'client' : 'provider', (float)$data['lat'], (float)$data['lng'], time()));
 
         return response()->json(['message' => 'ok']);
+    }
+
+    private function broadcastOrderStatusChange(Order $order, array $meta = []): void
+    {
+        app(OrderRealtimeService::class)->dispatchStatusChanged($order, $meta);
     }
 }

@@ -117,14 +117,14 @@ class AdminPanelProvider extends PanelProvider
                     ->group('Mawasiliano')
                     ->icon('heroicon-o-megaphone')
                     ->sort(5)
-                    ->url(fn (): string => url('/admin/broadcast-center'))
+                    ->url(fn (): string => BroadcastCenter::getUrl(panel: 'admin'))
                     ->isActiveWhen(fn (): bool => request()->routeIs('filament.admin.pages.broadcast-center')),
 
                 NavigationItem::make('App Notifications')
                     ->group('Mawasiliano')
                     ->icon('heroicon-o-bell-alert')
                     ->sort(6)
-                    ->url(fn (): string => url('/admin/app-notification-center'))
+                    ->url(fn (): string => AppNotificationCenter::getUrl(panel: 'admin'))
                     ->isActiveWhen(fn (): bool => request()->routeIs('filament.admin.pages.app-notification-center')),
             ])
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')

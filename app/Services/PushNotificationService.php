@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\DevicePushToken;
+use App\Support\AppVariant;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -37,7 +38,13 @@ class PushNotificationService
         ];
     }
 
-    public function sendToUsers(array|Collection $userIds, string $title, string $message, array $data = []): array
+    public function sendToUsers(
+        array|Collection $userIds,
+        string $title,
+        string $message,
+        array $data = [],
+        array $options = []
+    ): array
     {
         $ids = collect($userIds)
             ->map(fn ($id): int => (int) $id)
@@ -65,6 +72,14 @@ class PushNotificationService
         $tokens = DevicePushToken::query()
             ->whereIn('user_id', $ids->all())
             ->where('is_active', true)
+            ->when(!empty($this->resolvedVariants($data, $options)), function ($query) use ($data, $options) {
+                $variants = $this->resolvedVariants($data, $options);
+
+                $query->where(function ($builder) use ($variants): void {
+                    $builder->whereIn('app_variant', $variants)
+                        ->orWhereNull('app_variant');
+                });
+            })
             ->get(['id', 'token']);
 
         if ($tokens->isEmpty()) {
@@ -97,6 +112,16 @@ class PushNotificationService
         }
 
         return $result;
+    }
+
+    private function resolvedVariants(array $data, array $options): array
+    {
+        return AppVariant::normalize(
+            $options['app_variants']
+            ?? $data['app_variants']
+            ?? $data['app_variant']
+            ?? null
+        );
     }
 
     private function sendLegacyChunk(Collection $chunk, string $title, string $message, array $data): array

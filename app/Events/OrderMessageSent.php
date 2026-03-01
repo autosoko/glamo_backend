@@ -34,6 +34,7 @@ class OrderMessageSent implements ShouldBroadcastNow
         return [
             'order_id' => (int) $this->order->id,
             'conversation_id' => (int) $this->message->conversation_id,
+            'target_screen' => 'order_chat',
             'message' => [
                 'id' => (int) $this->message->id,
                 'body' => (string) ($this->message->body ?? ''),

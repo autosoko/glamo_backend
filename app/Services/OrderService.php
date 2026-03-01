@@ -8,6 +8,7 @@ use App\Models\ProviderLedger;
 use App\Models\ProviderWalletLedger;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
@@ -152,7 +153,12 @@ class OrderService
                 abort(422, 'Order is not pending.');
             }
             if ($order->provider_id !== $provider->id) {
-                abort(403, 'Not your order.');
+                Log::warning('Provider tried to accept order outside ownership', [
+                    'order_id' => (int) $order->id,
+                    'order_provider_id' => (int) $order->provider_id,
+                    'acting_provider_id' => (int) $provider->id,
+                ]);
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             // If client prepaid, provider should only accept after payment is confirmed (held in escrow).
@@ -276,10 +282,10 @@ class OrderService
                 ]);
 
                 // Auto block if over threshold
-                if ((float) $provider->debt_balance > $debtBlock) {
+                if ((float) $provider->debt_balance >= $debtBlock) {
                     $provider->update([
                         'online_status' => 'blocked_debt',
-                        'offline_reason' => 'Debt over ' . number_format($debtBlock, 0) . '. Please pay to continue.',
+                        'offline_reason' => 'Deni limefika TZS ' . number_format($debtBlock, 0) . ' au zaidi. Lipa deni liwe chini ya hapo.',
                     ]);
                 }
             }
@@ -299,7 +305,12 @@ class OrderService
                 abort(422, 'Order cannot be completed.');
             }
             if ($order->provider_id !== $provider->id) {
-                abort(403, 'Not your order.');
+                Log::warning('Provider tried to complete order outside ownership', [
+                    'order_id' => (int) $order->id,
+                    'order_provider_id' => (int) $order->provider_id,
+                    'acting_provider_id' => (int) $provider->id,
+                ]);
+                abort(403, 'Oda hii si ya akaunti yako. Refresh orders kisha jaribu tena.');
             }
 
             $order->update([
@@ -342,38 +353,7 @@ class OrderService
                 ]);
             }
 
-            // provider returns online only if allowed
-            $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-            if ($debtBlock <= 0) {
-                $debtBlock = 10000;
-            }
-
-            $hasBlockingOrders = Order::query()
-                ->where('provider_id', (int) $provider->id)
-                ->where('id', '!=', (int) $order->id)
-                ->whereNotIn('status', ['completed', 'cancelled', 'suspended'])
-                ->exists();
-
-            $debt = max(0, (float) ($provider->debt_balance ?? 0));
-            $isDebtBlocked = $debt > $debtBlock
-                || ((string) ($provider->online_status ?? '') === 'blocked_debt' && $debt >= $debtBlock);
-
-            if ($hasBlockingOrders) {
-                $provider->update([
-                    'online_status' => 'offline',
-                    'offline_reason' => 'Ana oda nyingine inayoendelea.',
-                ]);
-            } elseif ($isDebtBlocked) {
-                $provider->update([
-                    'online_status' => 'blocked_debt',
-                    'offline_reason' => 'Debt over ' . number_format($debtBlock, 0) . '. Please pay.',
-                ]);
-            } else {
-                $provider->update([
-                    'online_status' => 'offline',
-                    'offline_reason' => null,
-                ]);
-            }
+            app(ProviderAvailabilityService::class)->sync($provider, (int) $order->id, true, null, true);
 
             // increment quick stats
             $provider->increment('total_orders');

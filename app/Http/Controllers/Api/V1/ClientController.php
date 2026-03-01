@@ -12,9 +12,12 @@ use App\Models\Review;
 use App\Models\Service;
 use App\Models\User;
 use App\Services\Api\QuoteService;
+use App\Services\AppNotificationService;
 use App\Services\OrderNotifier;
 use App\Services\OrderPaymentService;
+use App\Services\OrderRealtimeService;
 use App\Services\OrderService;
+use App\Services\ProviderAvailabilityService;
 use App\Services\SnippePay;
 use App\Support\BookingWindow;
 use App\Support\Phone;
@@ -455,8 +458,9 @@ class ClientController extends Controller
         }
 
         $refundNeeded = false;
+        $availability = app(ProviderAvailabilityService::class);
 
-        DB::transaction(function () use ($order, &$refundNeeded, $cancelReason) {
+        DB::transaction(function () use ($order, &$refundNeeded, $cancelReason, $availability) {
             $locked = Order::whereKey((int) $order->id)->lockForUpdate()->firstOrFail();
             if (in_array((string) $locked->status, ['completed', 'cancelled'], true)) {
                 return;
@@ -496,11 +500,6 @@ class ClientController extends Controller
                 $method = (string) ($locked->payment_method ?? '');
                 $isCash = $method === '' || $method === 'cash';
 
-                $debtBlock = (float) config('glamo_pricing.provider_debt_block_threshold', 10000);
-                if ($debtBlock <= 0) {
-                    $debtBlock = 10000;
-                }
-
                 if ($isCash && in_array($prevStatus, ['accepted', 'on_the_way'], true)) {
                     $commission = (float) ($locked->commission_amount ?? 0);
                     $newBalance = max(0, (float) ($provider->debt_balance ?? 0) - $commission);
@@ -519,23 +518,7 @@ class ClientController extends Controller
                     ]);
                 }
 
-                if ($this->providerHasActiveOrders((int) $provider->id, (int) $locked->id)) {
-                    $provider->update([
-                        'online_status' => 'offline',
-                        'offline_reason' => 'Ana oda nyingine inayoendelea.',
-                    ]);
-                } else {
-                    $debt = max(0, (float) ($provider->debt_balance ?? 0));
-                    $isDebtBlocked = $debt > $debtBlock
-                        || ((string) ($provider->online_status ?? '') === 'blocked_debt' && $debt >= $debtBlock);
-
-                    $provider->update([
-                        'online_status' => $isDebtBlocked ? 'blocked_debt' : 'offline',
-                        'offline_reason' => $isDebtBlocked
-                            ? ('Debt over ' . number_format($debtBlock, 0) . '. Please pay.')
-                            : null,
-                    ]);
-                }
+                $availability->sync($provider, (int) $locked->id, true, null, true);
             }
         });
 
@@ -604,6 +587,26 @@ class ClientController extends Controller
         }
 
         $cancelled = Order::query()->with(['service.category', 'provider.user'])->find((int) $order->id);
+        if ($cancelled) {
+            $statusMeta = [
+                'status' => (string) $cancelled->status,
+                'reason' => $cancelReason,
+                'target_screen' => 'home',
+                'client_target_screen' => 'home',
+                'provider_target_screen' => 'home',
+                'clear_active_order' => true,
+            ];
+
+            $this->notifyProviderOrderStatus(
+                $cancelled,
+                'order_cancelled_by_client',
+                'Oda imeghairiwa na mteja',
+                'Oda ' . (string) ($cancelled->order_no ?? '#' . $cancelled->id) . ' imeghairiwa na mteja.',
+                $statusMeta
+            );
+
+            $this->broadcastOrderStatusChange($cancelled, $statusMeta);
+        }
 
         return $this->ok([
             'order' => $cancelled ? $this->orderPayload($cancelled) : null,
@@ -905,7 +908,7 @@ class ClientController extends Controller
         return (bool) ($provider->is_active)
             && (string) $provider->approval_status === 'approved'
             && (string) $provider->online_status === 'online'
-            && (float) ($provider->debt_balance ?? 0) <= $debtBlock;
+            && (float) ($provider->debt_balance ?? 0) < $debtBlock;
     }
 
     private function providerHasActiveOrders(int $providerId, ?int $excludeOrderId = null): bool
@@ -919,6 +922,46 @@ class ClientController extends Controller
         }
 
         return $query->exists();
+    }
+
+    private function notifyProviderOrderStatus(
+        Order $order,
+        string $type,
+        string $title,
+        string $message,
+        array $meta = []
+    ): void {
+        $order->loadMissing('provider:id,user_id');
+
+        $providerUserId = (int) data_get($order, 'provider.user_id', 0);
+        if ($providerUserId <= 0) {
+            return;
+        }
+
+        $payload = array_merge([
+            'order_id' => (string) (int) $order->id,
+            'order_no' => (string) ($order->order_no ?? '#' . $order->id),
+            'target_screen' => 'home',
+            'clear_active_order' => true,
+        ], $meta);
+
+        try {
+            app(AppNotificationService::class)->sendToUsers(
+                [$providerUserId],
+                trim($type),
+                trim($title),
+                trim($message),
+                $payload,
+                true
+            );
+        } catch (\Throwable $e) {
+            report($e);
+        }
+    }
+
+    private function broadcastOrderStatusChange(Order $order, array $meta = []): void
+    {
+        app(OrderRealtimeService::class)->dispatchStatusChanged($order, $meta);
     }
 
     private function orderPayload(Order $order, bool $withItems = false): array

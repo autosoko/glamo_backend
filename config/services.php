@@ -45,6 +45,16 @@ return [
         'app_store_url' => env('GLAMO_APP_STORE_URL', 'https://apps.apple.com/'),
         'play_store_url' => env('GLAMO_PLAY_STORE_URL', 'https://play.google.com/store'),
         'support_email' => env('GLAMO_SUPPORT_EMAIL', 'info@getglamo.com'),
+        'client' => [
+            'package_id' => env('GLAMO_CLIENT_PACKAGE_ID', 'com.beautful.link'),
+            'play_store_url' => env('GLAMO_CLIENT_PLAY_STORE_URL', env('GLAMO_PLAY_STORE_URL', 'https://play.google.com/store')),
+            'app_store_url' => env('GLAMO_CLIENT_APP_STORE_URL', env('GLAMO_APP_STORE_URL', 'https://apps.apple.com/')),
+        ],
+        'provider' => [
+            'package_id' => env('GLAMO_PROVIDER_PACKAGE_ID', 'com.glamopro.link'),
+            'play_store_url' => env('GLAMO_PROVIDER_PLAY_STORE_URL', env('GLAMO_PLAY_STORE_URL', 'https://play.google.com/store')),
+            'app_store_url' => env('GLAMO_PROVIDER_APP_STORE_URL', env('GLAMO_APP_STORE_URL', 'https://apps.apple.com/')),
+        ],
     ],
 
 ];

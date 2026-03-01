@@ -16,12 +16,18 @@ class OrderCreated implements ShouldBroadcast
 
     public function broadcastOn(): array
     {
-        // notify provider user channel + order channel
-        $providerUserId = $this->order->provider?->user_id;
-        return [
-            new PrivateChannel("user.$providerUserId"),
+        $this->order->loadMissing('provider:id,user_id');
+
+        $channels = [
             new PrivateChannel("order.{$this->order->id}"),
         ];
+
+        $providerUserId = (int) data_get($this->order, 'provider.user_id', 0);
+        if ($providerUserId > 0) {
+            $channels[] = new PrivateChannel("user.$providerUserId");
+        }
+
+        return $channels;
     }
 
     public function broadcastAs(): string
@@ -42,6 +48,9 @@ class OrderCreated implements ShouldBroadcast
             'client_phone' => $this->order->client?->phone,
             'client_lat' => (float) $this->order->client_lat,
             'client_lng' => (float) $this->order->client_lng,
+            'target_screen' => 'provider_order_details',
+            'auto_open' => true,
+            'clear_active_order' => false,
         ];
     }
 }

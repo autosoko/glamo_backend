@@ -8,6 +8,8 @@ use App\Models\Category;
 use App\Models\Provider;
 use App\Models\Service;
 use App\Services\Api\QuoteService;
+use App\Services\PushNotificationService;
+use App\Support\AppVariant;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +27,12 @@ class CatalogController extends Controller
             'play_store_url' => (string) config('services.glamo.play_store_url', ''),
             'app_store_url' => (string) config('services.glamo.app_store_url', ''),
             'api_base_url' => rtrim((string) config('app.url'), '/') . '/api/v1',
+            'app_variants' => array_values(AppVariant::definitions()),
+            'broadcast' => $this->broadcastConfig(),
+            'push' => array_merge(
+                app(PushNotificationService::class)->status(),
+                ['app_variants' => array_values(AppVariant::definitions())]
+            ),
         ]);
     }
 
@@ -352,14 +360,52 @@ class CatalogController extends Controller
     {
         return $this->ok([
             'glamo_client' => [
-                'play_store' => (string) config('services.glamo.play_store_url', ''),
-                'app_store' => (string) config('services.glamo.app_store_url', ''),
+                'variant' => AppVariant::CLIENT,
+                'package_id' => (string) config('services.glamo.client.package_id', 'com.beautful.link'),
+                'play_store' => (string) config('services.glamo.client.play_store_url', config('services.glamo.play_store_url', '')),
+                'app_store' => (string) config('services.glamo.client.app_store_url', config('services.glamo.app_store_url', '')),
             ],
             'glamo_provider' => [
-                'play_store' => (string) config('services.glamo.play_store_url', ''),
-                'app_store' => (string) config('services.glamo.app_store_url', ''),
+                'variant' => AppVariant::PROVIDER,
+                'package_id' => (string) config('services.glamo.provider.package_id', 'com.glamopro.link'),
+                'play_store' => (string) config('services.glamo.provider.play_store_url', config('services.glamo.play_store_url', '')),
+                'app_store' => (string) config('services.glamo.provider.app_store_url', config('services.glamo.app_store_url', '')),
             ],
+            'broadcast' => $this->broadcastConfig(),
         ]);
+    }
+
+    private function broadcastConfig(): array
+    {
+        $driver = (string) config('broadcasting.default', 'null');
+        $connection = (array) config("broadcasting.connections.$driver", []);
+        $options = (array) ($connection['options'] ?? []);
+        $key = trim((string) ($connection['key'] ?? ''));
+
+        return [
+            'enabled' => $driver !== 'null',
+            'driver' => $driver,
+            'configured' => $driver !== 'null' && $key !== '',
+            'auth_endpoint' => url('/broadcasting/auth'),
+            'connection' => [
+                'key' => $key !== '' ? $key : null,
+                'host' => $options['host'] ?? null,
+                'port' => isset($options['port']) ? (int) $options['port'] : null,
+                'scheme' => $options['scheme'] ?? null,
+                'cluster' => $options['cluster'] ?? null,
+                'use_tls' => (bool) ($options['useTLS'] ?? $options['encrypted'] ?? false),
+            ],
+            'channels' => [
+                'user.{userId}',
+                'order.{orderId}',
+            ],
+            'events' => [
+                'order.created',
+                'order.status.changed',
+                'order.message.sent',
+                'provider.availability.updated',
+            ],
+        ];
     }
 
     private function attachDisplayPricing(Collection $services, ?float $lat, ?float $lng): void
@@ -412,7 +458,7 @@ class CatalogController extends Controller
                     ->where('providers.is_active', 1)
                     ->where('providers.approval_status', 'approved')
                     ->where('providers.online_status', 'online')
-                    ->where('providers.debt_balance', '<=', $debtBlock)
+                    ->where('providers.debt_balance', '<', $debtBlock)
                     ->whereNotNull('providers.current_lat')
                     ->whereNotNull('providers.current_lng')
                     ->having('distance_km', '<=', $radiusKm)

@@ -21,7 +21,7 @@ class QuoteService
         return (bool) ($provider->is_active)
             && (string) $provider->approval_status === 'approved'
             && (string) $provider->online_status === 'online'
-            && (float) ($provider->debt_balance ?? 0) <= $debtBlock;
+            && (float) ($provider->debt_balance ?? 0) < $debtBlock;
     }
 
     public function providersForService(Service $service, ?float $lat, ?float $lng, int $limit = 24): Collection
@@ -44,7 +44,7 @@ class QuoteService
             ->where('providers.is_active', true)
             ->where('providers.approval_status', 'approved')
             ->where('providers.online_status', 'online')
-            ->where('providers.debt_balance', '<=', $debtBlock)
+            ->where('providers.debt_balance', '<', $debtBlock)
             ->with([
                 'user:id,name,phone',
                 'portfolio:id,provider_id,type,file_path',

@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\BeemOtp;
 use App\Services\PhoneOtpService;
 use App\Services\PushNotificationService;
+use App\Support\AppVariant;
 use App\Support\Phone;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -370,6 +371,8 @@ class AccountController extends Controller
         }
 
         $tokenHash = hash('sha256', $token);
+        $appVariant = AppVariant::normalizeOne(isset($data['app_variant']) ? (string) $data['app_variant'] : null)
+            ?: AppVariant::fromRole((string) ($user->role ?? ''));
 
         $record = DevicePushToken::query()->firstOrNew([
             'token_hash' => $tokenHash,
@@ -379,7 +382,7 @@ class AccountController extends Controller
             'user_id' => (int) $user->id,
             'token' => $token,
             'platform' => (string) $data['platform'],
-            'app_variant' => isset($data['app_variant']) ? trim((string) $data['app_variant']) : null,
+            'app_variant' => $appVariant,
             'device_id' => isset($data['device_id']) ? trim((string) $data['device_id']) : null,
             'is_active' => true,
             'last_seen_at' => now(),
@@ -397,6 +400,7 @@ class AccountController extends Controller
             'token_id' => (int) $record->id,
             'platform' => (string) $record->platform,
             'app_variant' => $record->app_variant ?: null,
+            'app_variant_meta' => $record->app_variant ? (AppVariant::definitions()[$record->app_variant] ?? null) : null,
             'device_id' => $record->device_id ?: null,
             'is_active' => (bool) $record->is_active,
             'last_seen_at' => optional($record->last_seen_at)->toIso8601String(),
